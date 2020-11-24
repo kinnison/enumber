@@ -5,7 +5,7 @@ authors = ["Daniel Silverstone <dsilvers@digital-scurf.org>"]
 edition = "2018"
 
 description = "Provide useful impls on numerical enums"
-documenation = "https://docs.rs/enumber/"
+documentation = "https://docs.rs/enumber/"
 repository = "https://github.com/kinnison/enumber/"
 license = "BSD-3-Clause"
 readme = "README.md"

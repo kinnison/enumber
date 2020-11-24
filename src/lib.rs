@@ -303,15 +303,16 @@ fn generate_conversions(input: DeriveInput) -> Result<impl Into<TokenStream>, Er
                 }
             })
             .collect();
-        let default_arm = default_variant
-            .as_ref()
-            .map(|(i, _)| {
-                let istr = i.to_string();
-                quote!(
-                    Self :: #i (value) => write!(f, concat!(#istr, "({})"), value),
-                )
-            })
-            .unwrap_or_else(|| quote!());
+        let default_arm = if let Some(tokens) = default_variant.as_ref().map(|(i, _)| {
+            let istr = i.to_string();
+            quote!(
+                Self :: #i (value) => write!(f, concat!(#istr, "({})"), value),
+            )
+        }) {
+            tokens
+        } else {
+            quote!()
+        };
 
         quote! {
             impl ::std::fmt::Display for #name {
