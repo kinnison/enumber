@@ -325,7 +325,13 @@ fn generate_conversions(input: DeriveInput) -> Result<impl Into<TokenStream>, Er
                         #(#matcharms)*
                         other => {
                             use ::std::convert::TryFrom;
-                            let value: #inttype = other.parse().map_err(|_| #errorname :: UnknownName(s.into()))?;
+                            let value: #inttype = if other.starts_with("0x") {
+                                #inttype :: from_str_radix(&other[2..], 16)
+                            } else if other.starts_with("0o") {
+                                #inttype :: from_str_radix(&other[2..], 8)
+                            } else {
+                                other.parse()
+                            }.map_err(|_| #errorname :: UnknownName(s.into()))?;
                             match #name :: try_from(value) {
                                 #err_convert_case
                                 Ok(v) => Ok(v),

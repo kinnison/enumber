@@ -19,6 +19,7 @@ enum ClosedExample {
 #[enumber::convert]
 #[repr(u8)]
 #[exhaustive]
+#[derive(Debug)]
 pub enum LogLevel {
     All = 0x00..=0x1f,
     Trace = 0x20..=0x3f,
@@ -32,4 +33,16 @@ pub enum LogLevel {
 #[test]
 fn test_open_from_num_canfail() {
     assert!(OpenExample::try_from(45).is_err());
+}
+
+#[test]
+fn check_from_hex() {
+    use std::str::FromStr;
+    match LogLevel::from_str("0xa3") {
+        Ok(v) => match v {
+            LogLevel::Warn(n) if n == 0xa3 => {}
+            t => panic!("Unexpected parsed value: {:?}", t),
+        },
+        Err(e) => panic!(e),
+    }
 }
