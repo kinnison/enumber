@@ -1,3 +1,46 @@
+//! # Numerical enumerations
+//!
+//! The `enumber` crate provides a mechanism for deriving a lot of useful helpers
+//! for your enumerations which are sets of numbers.  Its main purpose is to
+//! provide convenience implementations of a number of useful traits for your
+//! enumerations automatically.
+//!
+//! See the [`convert`][macro@convert] macro for details, however here is a basic
+//! example:
+//!
+//! ```rust
+//! #[enumber::convert]
+//! #[repr(usize)]
+//! enum Simple {
+//!     Foo = 1,
+//!     Bar = 2,
+//! }
+//!
+//! use std::convert::TryFrom;
+//!
+//! // You can use try_from() to go from a suitable number to an instance of
+//! // your enumeration.
+//! assert!(matches!(Simple::try_from(1), Ok(Simple::Foo)));
+//!
+//! // You can convert from instances of your enumeration to a number.
+//! assert_eq!(2 as usize, Simple::Bar.into());
+//!
+//! // You can render instances of your enumeration to strings.
+//! assert_eq!(&format!("{}", Simple::Foo), "Foo");
+//!
+//! // And you can convert from a string to your enumeration, using the names
+//! // of the enumeration items (case insensitively) or by number.  If the
+//! // name or number is invalid, you'll get an error.
+//!
+//! use std::str::FromStr;
+//! assert!(matches!(Simple::from_str("Foo"), Ok(Simple::Foo)));
+//! assert!(matches!(Simple::from_str("bAr"), Ok(Simple::Bar)));
+//! assert!(matches!(Simple::from_str("1"), Ok(Simple::Foo)));
+//! assert!(matches!(Simple::from_str("0x02"), Ok(Simple::Bar)));
+//! assert!(matches!(Simple::from_str("3"), Err(ParseSimpleError::UnknownValue(_))));
+//! assert!(matches!(Simple::from_str("wibble"), Err(ParseSimpleError::UnknownName(_))));
+//! ```
+
 use proc_macro::TokenStream;
 
 use quote::quote;
@@ -355,6 +398,7 @@ fn generate_conversions(input: DeriveInput) -> Result<impl Into<TokenStream>, Er
     })
 }
 
+#[doc(hidden)]
 #[proc_macro_derive(Convert, attributes(value, exhaustive, ranged, default))]
 pub fn derive_convert(item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
@@ -423,6 +467,85 @@ fn convert_to_derive(mut input: DeriveInput) -> Result<DeriveInput, Error> {
     Ok(input)
 }
 
+/// Convert an `enumber` compliant enum into a proper enum with
+/// appropriate associated traits.
+///
+/// As an example, you might have the following enum definition:
+///
+/// ```rust
+/// #[enumber::convert]
+/// enum Ordinals {
+///     First = 1,
+///     Second = 2,
+///     Third = 3,
+///     TheRest(u16),
+/// }
+/// ```
+///
+/// Normally that enum would be invalid because of the combination of
+/// both explicit discriminants, and a tuple-style variant.  The conversion
+/// will strip the discriminants off the enumeration and then implement
+/// conversions to/from the number type of the tuple-style variant.
+///
+/// In addition, implementations of [`Display`][std::fmt::Display] and
+/// [`FromStr`][std::str::FromStr] will be automatically provided.  The error
+/// type for the `FromStr` implementation will be named `Parse${NAME}Error`
+/// and will have the same visibility specifier as your enum had.
+///
+/// The error enumeration will look like this:
+///
+/// ```rust,no_compile
+/// enum ParseOrdinalsError {
+///     UnknownName(String),
+///     UnknownValue(u16)
+/// }
+/// ```
+///
+/// Naturally the integer type in the `UnknownValue` variant will be that of the
+/// enum's tuple-style variant.
+///
+/// If you do not wish to have an "other" variant, then you can omit it, in which
+/// case you must specify the representation of the enumeration explicitly:
+///
+/// ```rust
+/// #[enumber::convert]
+/// #[repr(u8)]
+/// enum AccessLevel {
+///     Guest = 0,
+///     Member = 1,
+///     Developer = 2,
+///     Owner = 3,
+/// }
+/// ```
+///
+/// In this case, `From<${TYPE}>` will not be implemented, and instead there
+/// will be an implementation of `TryFrom<${TYPE}>` where the error type for
+/// that conversion is simply the input number type.
+///
+/// You *may* specify variants as taking a range rather than a fixed value,
+/// and if you do, then the variant will be converted into a tuple type
+/// automatically, in order to hold the exact value given during conversion.
+/// As with the above examples, if you do not also specify a default variant
+/// then you will have to specify the relevant integer representation.
+///
+/// Finally, if you are certain that your given values (or ranges) cover all
+/// possible input values to the conversion functions, and you wish to omit the
+/// default variant, then you can specify `#[exhaustive]` on the enumeration and
+/// `enumber` will create a `From<${TYPE}>` impl despite the lack of the default
+/// variant.  Of course, if your values are not exhaustive then the compiler will
+/// flag an error and not continue.
+///
+/// ```rust,compile_fail
+/// #[enumber::convert]
+/// #[exhaustive]
+/// #[repr(u8)]
+/// enum Age {
+///     Child = 0..=12,
+///     Teenager = 13..=19,
+///     Adult = 20..=65,
+///     Pensioner = 66..=254, // Not quite enough, so this will fail to compile
+/// }
+/// ```
 #[proc_macro_attribute]
 pub fn convert(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
