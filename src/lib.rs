@@ -369,10 +369,10 @@ fn generate_conversions(input: DeriveInput) -> Result<impl Into<TokenStream>, Er
                         #(#matcharms)*
                         other => {
                             use ::std::convert::TryFrom;
-                            let value: #inttype = if other.starts_with("0x") {
-                                #inttype :: from_str_radix(&other[2..], 16)
-                            } else if other.starts_with("0o") {
-                                #inttype :: from_str_radix(&other[2..], 8)
+                            let value: #inttype = if let Some(rest) = other.strip_prefix("0x") {
+                                #inttype :: from_str_radix(rest, 16)
+                            } else if let Some(rest) = other.strip_prefix("0o") {
+                                #inttype :: from_str_radix(rest, 8)
                             } else {
                                 other.parse()
                             }.map_err(|_| #errorname :: UnknownName(s.into()))?;
