@@ -16,6 +16,19 @@ enum ClosedExample {
     Other(u8),
 }
 
+#[enumber::convert]
+#[repr(u8)]
+#[exhaustive]
+pub enum LogLevel {
+    All = 0x00..=0x1f,
+    Trace = 0x20..=0x3f,
+    Debug = 0x40..=0x5f,
+    Normal = 0x60..=0x7f,
+    Info = 0x80..=0x9f,
+    Warn = 0xa0..=0xbf,
+    Error = 0xc0..=0xff,
+}
+
 #[test]
 fn test_open_from_num_canfail() {
     assert!(OpenExample::try_from(45).is_err());
