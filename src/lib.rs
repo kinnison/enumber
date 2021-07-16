@@ -5,8 +5,8 @@
 //! provide convenience implementations of a number of useful traits for your
 //! enumerations automatically.
 //!
-//! See the [`convert`][macro@convert] macro for details, however here is a basic
-//! example:
+//! See the [`convert`][macro@convert] macro and [`into`][macro@into]
+//! macro for details, however here is a basic example:
 //!
 //! ```rust
 //! #[enumber::convert]
@@ -40,10 +40,37 @@
 //! assert!(matches!(Simple::from_str("3"), Err(ParseSimpleError::UnknownValue(_))));
 //! assert!(matches!(Simple::from_str("wibble"), Err(ParseSimpleError::UnknownName(_))));
 //! ```
+//!
+//! The [`into`][macro@into] macro only implements `From`.  But,
+//! unlike the [`convert`][macro@convert] macro, it is able to convert
+//! variants with data to a value.  (It can't convert values to
+//! variants, because the data is missing.)  This is helpful, for
+//! instance, for converting rich error types to simple error codes at
+//! an FFI boundary.
+//!
+//! ```rust
+//! #[enumber::into]
+//! #[repr(usize)]
+//! enum Errors {
+//!     Success = 0,
+//!     #[value(0x10)] NotDefined(String),
+//!     InvalidArg(String, String) = 0x20,
+//!     OpNotSupported = 0x30,
+//! }
+//!
+//! // You can convert from instances of your enumeration to a number.
+//! assert_eq!(0 as usize, Errors::Success.into());
+//! assert_eq!(0x10 as usize, Errors::NotDefined("a".into()).into());
+//! assert_eq!(0x10 as usize, Errors::NotDefined("123".into()).into());
+//! assert_eq!(0x20 as usize, Errors::InvalidArg("a".into(), "123".into()).into());
+//! assert_eq!(0x30 as usize, Errors::OpNotSupported.into());
+//! ```
 
 use proc_macro::TokenStream;
 
-use quote::quote;
+use quote::{
+    quote, ToTokens
+};
 use syn::{
     parse_macro_input, parse_quote, Attribute, Data, DeriveInput, Error, Expr, Field, Fields,
     Ident, Type, Visibility,
@@ -51,6 +78,13 @@ use syn::{
 use syn::{punctuated::Punctuated, FieldsUnnamed};
 use syn::{spanned::Spanned, ExprRange};
 use syn::{token::Paren, RangeLimits};
+
+// Whether we are in enumber::Convert or enumber::Into mode.
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+enum Mode {
+    Convert,
+    Into,
+}
 
 fn find_repr(name: &Ident, input: &[Attribute]) -> Result<Type, Error> {
     for attr in input.iter() {
@@ -61,7 +95,9 @@ fn find_repr(name: &Ident, input: &[Attribute]) -> Result<Type, Error> {
     Err(Error::new_spanned(name, "missing repr(SomeType) attribute"))
 }
 
-fn generate_conversions(input: DeriveInput) -> Result<impl Into<TokenStream>, Error> {
+fn generate_conversions(input: DeriveInput, mode: Mode)
+    -> Result<impl Into<TokenStream>, Error>
+{
     let name = &input.ident;
     let visibility = &input.vis;
     let variants = match &input.data {
@@ -72,19 +108,25 @@ fn generate_conversions(input: DeriveInput) -> Result<impl Into<TokenStream>, Er
     let mut exhaustive = input.attrs.iter().any(|a| a.path.is_ident("exhaustive"));
 
     let mut default_variant = None;
-    let mut values = Vec::new();
+    let mut values: Vec<(_, _, usize)> = Vec::new();
     for (n, variant) in variants.iter().enumerate() {
+        let mut value: Option<Expr> = None;
+        for attr in variant.attrs.iter().filter(|a| a.path.is_ident("value")) {
+            if value.is_some() {
+                return Err(Error::new_spanned(attr, "only one value is permitted"));
+            }
+            value = Some(attr.parse_args()?);
+        }
+
+        // enum Foo {
+        //     X,                 // Unit
+        //     Y(String),         // Unnamed, len = 1,
+        //     Z(String, String), // Unnamed, len = 2,
+        // }
         match &variant.fields {
             Fields::Unit => {
-                let mut value: Option<Expr> = None;
-                for attr in variant.attrs.iter().filter(|a| a.path.is_ident("value")) {
-                    if value.is_some() {
-                        return Err(Error::new_spanned(attr, "only one value is permitted"));
-                    }
-                    value = Some(attr.parse_args()?);
-                }
                 if let Some(value) = value {
-                    values.push((value.clone(), value));
+                    values.push((value.clone(), value, 0));
                 } else {
                     return Err(Error::new_spanned(
                         &variant.ident,
@@ -93,43 +135,48 @@ fn generate_conversions(input: DeriveInput) -> Result<impl Into<TokenStream>, Er
                 }
             }
             Fields::Unnamed(f) => {
-                if f.unnamed.len() != 1 {
-                    return Err(Error::new_spanned(
-                        &variant.ident,
-                        "default variant must have single value",
-                    ));
-                }
-                if variant.attrs.iter().any(|a| a.path.is_ident("default")) {
-                    if default_variant.is_some() {
+                if let Some(value) = value {
+                    values.push((value.clone(), value, f.unnamed.len()));
+                } else {
+                    if f.unnamed.len() != 1 {
                         return Err(Error::new_spanned(
                             &variant.ident,
-                            "default variant must be the only one in the enum",
+                            "default variant must have single value",
                         ));
                     }
-                    default_variant = Some(n);
-                } else if let Some(range) = variant.attrs.iter().find(|a| a.path.is_ident("ranged"))
-                {
-                    let range: ExprRange = range.parse_args()?;
-                    if range.from.is_none() && range.to.is_none() {
-                        return Err(Error::new_spanned(range, "empty ranges are not supported"));
-                    }
-                    let base = range
-                        .from
-                        .as_ref()
-                        .unwrap_or_else(|| range.to.as_ref().unwrap());
-                    let def: Expr = if range.from.is_none()
-                        && matches!(range.limits, RangeLimits::HalfOpen(_))
+                    if variant.attrs.iter().any(|a| a.path.is_ident("default")) {
+                        if default_variant.is_some() {
+                            return Err(Error::new_spanned(
+                                &variant.ident,
+                                "an enum can only have one default variant",
+                            ));
+                        }
+                        default_variant = Some(n);
+                    } else if let Some(range) = variant.attrs.iter().find(|a| a.path.is_ident("ranged"))
                     {
-                        parse_quote!(#base - 1)
+                        let range: ExprRange = range.parse_args()?;
+                        if range.from.is_none() && range.to.is_none() {
+                            return Err(Error::new_spanned(range, "empty ranges are not supported"));
+                        }
+                        let base = range
+                            .from
+                            .as_ref()
+                            .unwrap_or_else(|| range.to.as_ref().unwrap());
+                        let def: Expr = if range.from.is_none()
+                            && matches!(range.limits, RangeLimits::HalfOpen(_))
+                        {
+                            parse_quote!(#base - 1)
+                        } else {
+                            parse_quote!(#base)
+                        };
+                        values.push((Expr::Range(range), def, f.unnamed.len()));
                     } else {
-                        parse_quote!(#base)
-                    };
-                    values.push((Expr::Range(range), def));
-                } else {
-                    return Err(Error::new_spanned(
-                        &variant.ident,
-                        "tuple variant must be labelled either default or ranged",
-                    ));
+                        return Err(Error::new_spanned(
+                            &variant.ident,
+                            "tuple variant must have an explicit value (#[value(...)]) \
+                             or be labelled default or ranged",
+                        ));
+                    }
                 }
             }
             _ => {
@@ -176,121 +223,190 @@ fn generate_conversions(input: DeriveInput) -> Result<impl Into<TokenStream>, Er
     // At this point, we have a type for the enumeration and we have a default
     // variant if there is one.
 
+    // A tuple consisting of:
+    //
+    //   0. The variant's name (Foo)
+    //   1. The lowercased name (foo)
+    //   2. The variant's value ('1').
+    //   3. The variant's default value.  For ranges, this is the
+    //   lower bound of the range.  For everything else it is the same
+    //   as the value (#2).
+    //   4. The number of fields in the variant.
     let mappings: Vec<_> = values
         .into_iter()
         .enumerate()
         .map(|(n, value)| {
             let name = &variants[n].ident;
             let lower_name = name.to_string().to_ascii_lowercase();
-            (name, lower_name, value.0, value.1)
+            (name, lower_name, value.0, value.1, value.2)
         })
         .collect();
 
+    let mut tokens = quote!{};
+
     // We now have a set of mappings, so let's generate the conversion *to*
-    // the type we want
-
-    let into_literal = {
-        let matcharms: Vec<_> = mappings
-            .iter()
-            .map(|entry| {
-                let name = entry.0;
-                let value = &entry.2;
-                if matches!(value, Expr::Range(_)) {
-                    quote!(
-                        Self::#name(value) => value,
-                    )
-                } else {
-                    quote!(
-                        Self :: #name => #value,
-                    )
+    // the type we want.  Something like:
+    //
+    //   impl ::std::convert::Into<u16> for OpenExample
+    //   {
+    //       fn into(self) -> u16
+    //       {
+    //           match self {
+    //               Self::First => 1,
+    //               Self::Second => 2,
+    //               Self::Third => 23,
+    //           }
+    //       }
+    //   }
+    let matcharms: Vec<_> = mappings
+        .iter()
+        .map(|entry| {
+            let name = entry.0;
+            let value = &entry.2;
+            let fields = entry.4;
+            if matches!(value, Expr::Range(_)) {
+                quote!(
+                    Self::#name(value) => value,
+                )
+            } else if fields > 0 {
+                let mut f = quote!();
+                for _ in 0..fields {
+                    quote!(_,).to_tokens(&mut f);
                 }
-            })
-            .collect();
-        let defaultarm = if let Some((name, _)) = default_variant {
-            quote!(
-                Self :: #name (value) => value,
-            )
-        } else {
-            quote!()
-        };
-        quote! {
-            impl ::std::convert::Into<#inttype> for #name {
-                fn into(self) -> #inttype {
-                    match self {
-                        #(#matcharms)*
-                        #defaultarm
-                    }
-                }
+                quote!(
+                    Self :: #name(#f) => #value,
+                )
+            } else {
+                quote!(
+                    Self :: #name => #value,
+                )
             }
-        }
-    };
-
-    let from_literal = if exhaustive {
-        let literal_arms: Vec<_> = mappings
-            .iter()
-            .map(|(ident, _, literal, _)| {
-                if matches!(literal, Expr::Range(_)) {
-                    quote! {
-                        value @ #literal => Self::#ident (value),
-                    }
-                } else {
-                    quote! {
-                        #literal => Self::#ident,
-                    }
-                }
-            })
-            .collect();
-        let default_arm = if let Some((default_name, _)) = default_variant {
-            quote!(other => Self :: #default_name (other),)
-        } else {
-            quote!()
-        };
-        quote! {
-            impl ::std::convert::From<#inttype> for #name {
-                fn from(value: #inttype) -> Self {
-                    #[deny(unreachable_patterns)]
-                    match value {
-                        #(#literal_arms)*
-                        #default_arm
-                    }
-                }
-            }
-        }
+        })
+        .collect();
+    let defaultarm = if let Some((name, _)) = default_variant {
+        quote!(
+            Self :: #name (value) => value,
+        )
     } else {
-        let literal_arms: Vec<_> = mappings
-            .iter()
-            .map(|(ident, _, literal, _)| {
-                if matches!(literal, Expr::Range(_)) {
-                    quote! {
-                        value @ #literal => Ok(Self::#ident (value)),
-                    }
-                } else {
-                    quote! {
-                        #literal => Ok(Self::#ident),
-                    }
-                }
-            })
-            .collect();
+        quote!()
+    };
 
-        quote! {
-            impl ::std::convert::TryFrom<#inttype> for #name {
-                type Error = #inttype;
-
-                fn try_from(value: #inttype) -> ::std::result::Result<Self, #inttype> {
-                    #[deny(unreachable_patterns)]
-                    match value {
-                        #(#literal_arms)*
-                        other => Err(value),
-                    }
+    let t = quote! {
+        impl ::std::convert::Into<#inttype> for #name {
+            fn into(self) -> #inttype {
+                match self {
+                    #(#matcharms)*
+                    #defaultarm
                 }
             }
         }
     };
+    t.to_tokens(&mut tokens);
 
-    let display_impl = {
+    if mode == Mode::Convert {
+        // The From or TryFrom implementation:
+        //
+        //   impl ::std::convert::TryFrom<u16> for OpenExample
+        //   {
+        //       type Error = u16;
+        //       fn try_from(value : u16) -> ::std::result::Result<Self, u16>
+        //       {
+        //         #[deny(unreachable_patterns)]
+        //         match value
+        //         {
+        //             1 => Ok(Self::First),
+        //             2 => Ok(Self::Second),
+        //             23 => Ok(Self::Third),
+        //             other => Err(value),
+        //         }
+        //       }
+        //   }
+        if exhaustive {
+            // It's exhaustive so we can implement From.
+            let literal_arms: Vec<_> = mappings
+                .iter()
+                .map(|(ident, _, literal, _, _)| {
+                    if matches!(literal, Expr::Range(_)) {
+                        quote! {
+                            value @ #literal => Self::#ident (value),
+                        }
+                    } else {
+                        quote! {
+                            #literal => Self::#ident,
+                        }
+                    }
+                })
+                .collect();
+            let default_arm = if let Some((default_name, _)) = default_variant {
+                quote!(other => Self :: #default_name (other),)
+            } else {
+                quote!()
+            };
+
+            let t = quote! {
+                impl ::std::convert::From<#inttype> for #name {
+                    fn from(value: #inttype) -> Self {
+                        #[deny(unreachable_patterns)]
+                        match value {
+                            #(#literal_arms)*
+                            #default_arm
+                        }
+                    }
+                }
+            };
+            t.to_tokens(&mut tokens);
+        } else {
+            // It's not exhaustive so we implement TryFrom.
+            let literal_arms: Vec<_> = mappings
+                .iter()
+                .map(|(ident, _, literal, _, _)| {
+                    if matches!(literal, Expr::Range(_)) {
+                        quote! {
+                            value @ #literal => Ok(Self::#ident (value)),
+                        }
+                    } else {
+                        quote! {
+                            #literal => Ok(Self::#ident),
+                        }
+                    }
+                })
+                .collect();
+
+            let t = quote! {
+                impl ::std::convert::TryFrom<#inttype> for #name {
+                    type Error = #inttype;
+
+                    fn try_from(value: #inttype) -> ::std::result::Result<Self, #inttype> {
+                        #[deny(unreachable_patterns)]
+                        match value {
+                            #(#literal_arms)*
+                            other => Err(value),
+                        }
+                    }
+                }
+            };
+            t.to_tokens(&mut tokens);
+        }
+    }
+
+    // A Display implementation:
+    //
+    //   impl ::std::fmt::Display for OpenExample
+    //   {
+    //       fn fmt(&self, f: &mut::std::fmt::Formatter<'_>) -> std::fmt::Result
+    //       {
+    //           match self
+    //           {
+    //               Self::First => f.write_str("First"),
+    //               Self::Second => f.write_str("Second"),
+    //               Self::Third => f.write_str("Third"),
+    //           }
+    //       }
+    //   }
+    if mode == Mode::Convert {
         let matcharms: Vec<_> = mappings
             .iter()
-            .map(|(i, _, lit, _)| {
+            .map(|(i, _, lit, _, _)| {
                 let istr = i.to_string();
                 if matches!(lit, Expr::Range(_)) {
                     quote! {
@@ -314,7 +430,7 @@ fn generate_conversions(input: DeriveInput) -> Result<impl Into<TokenStream>, Er
             quote!()
         };
 
-        quote! {
+        let t = quote! {
             impl ::std::fmt::Display for #name {
                 fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> std::fmt::Result {
                     match self {
@@ -323,13 +439,50 @@ fn generate_conversions(input: DeriveInput) -> Result<impl Into<TokenStream>, Er
                     }
                 }
             }
-        }
-    };
+        };
 
-    let fromstr_impl = {
+        t.to_tokens(&mut tokens);
+    }
+
+    if mode == Mode::Convert {
+        // A FromStr implementation:
+        //
+        //   #[derive(Debug)]
+        //   enum ParseClosedExampleError
+        //   {
+        //       UnknownName(::std::string::String),
+        //       UnknownValue(u8),
+        //   }
+        //   impl ::std::str::FromStr for ClosedExample
+        //   {
+        //       type Err = ParseClosedExampleError;
+        //       fn from_str(s: &str) -> ::std::result::Result<Self, Self::Err>
+        //       {
+        //           match s.to_ascii_lowercase().as_str()
+        //           {
+        //               "One" => Ok(Self::One),
+        //               "two" => Ok(Self::Two),
+        //               "five" => Ok(Self::Five),
+        //               other => {
+        //                   use ::std::convert::TryFrom;
+        //                   let value : u8 = if let Some(rest) = other.strip_prefix("0x") {
+        //                       u8::from_str_radix(rest, 16)
+        //                   } else if let Some(rest) = other.strip_prefix("0o") {
+        //                       u8::from_str_radix(rest, 8)
+        //                   } else {
+        //                       other.parse()
+        //                   }.map_err(|_| ParseClosedExampleError::UnknownName(s.into()))?;
+        //                   match ClosedExample::try_from(value) {
+        //                       Err(v) => unreachable!(),
+        //                       Ok(v) => Ok(v),
+        //                   }
+        //               }
+        //           }
+        //       }
+        //   }
         let matcharms: Vec<_> = mappings
             .iter()
-            .map(|(name, lower_name, lit, def)| {
+            .map(|(name, lower_name, lit, def, _)| {
                 if matches!(lit, Expr::Range(_)) {
                     quote! {
                         #lower_name => Ok(Self::#name(#def)),
@@ -353,8 +506,7 @@ fn generate_conversions(input: DeriveInput) -> Result<impl Into<TokenStream>, Er
             )
         };
 
-        quote! {
-
+        let t = quote! {
             #[derive(Debug)]
             #visibility enum #errorname {
                 UnknownName(::std::string::String),
@@ -384,32 +536,24 @@ fn generate_conversions(input: DeriveInput) -> Result<impl Into<TokenStream>, Er
                     }
                 }
             }
-        }
-    };
+        };
+        t.to_tokens(&mut tokens);
+    }
 
-    Ok(quote! {
-
-        #into_literal
-
-        #from_literal
-
-        #display_impl
-
-        #fromstr_impl
-    })
+    Ok(tokens)
 }
 
 #[doc(hidden)]
 #[proc_macro_derive(Convert, attributes(value, exhaustive, ranged, default))]
 pub fn derive_convert(item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
-    match generate_conversions(input) {
+    match generate_conversions(input, Mode::Convert) {
         Ok(res) => res.into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
 
-fn convert_to_derive(mut input: DeriveInput) -> Result<DeriveInput, Error> {
+fn to_derive(mut input: DeriveInput, mode: Mode) -> Result<DeriveInput, Error> {
     let variants = match &mut input.data {
         Data::Enum(data) => &mut data.variants,
         _ => return Err(Error::new_spanned(input, "input must be an enum")),
@@ -417,9 +561,18 @@ fn convert_to_derive(mut input: DeriveInput) -> Result<DeriveInput, Error> {
 
     input.attrs.insert(
         0,
-        parse_quote!(
-            #[derive(::enumber::Convert)]
-        ),
+        match mode {
+            Mode::Convert => {
+                parse_quote!(
+                    #[derive(::enumber::Convert)]
+                )
+            }
+            Mode::Into => {
+                parse_quote!(
+                    #[derive(::enumber::Into)]
+                )
+            }
+        }
     );
 
     let mut repr = find_repr(&input.ident, &input.attrs).ok();
@@ -439,7 +592,7 @@ fn convert_to_derive(mut input: DeriveInput) -> Result<DeriveInput, Error> {
                 ));
             }
         }
-        if matches!(variant.fields, Fields::Unnamed(_)) {
+        if mode != Mode::Into && matches!(variant.fields, Fields::Unnamed(_)) {
             variant.attrs.push(parse_quote!(#[default]));
             repr = Some(match &variant.fields {
                 Fields::Unnamed(u) => u.unnamed[0].ty.clone(),
@@ -551,7 +704,92 @@ fn convert_to_derive(mut input: DeriveInput) -> Result<DeriveInput, Error> {
 pub fn convert(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
 
-    match convert_to_derive(input) {
+    match to_derive(input, Mode::Convert) {
+        Ok(res) => quote!(#res).into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+#[doc(hidden)]
+#[proc_macro_derive(Into, attributes(value))]
+pub fn derive_into(item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as DeriveInput);
+    match generate_conversions(input, Mode::Into) {
+        Ok(res) => res.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+/// Convert an `enumber` compliant enum whose variants have data into
+/// a proper enum with appropriate associated traits.
+///
+/// As an example, you might have the following enum definition:
+///
+/// ```rust
+/// #[enumber::into]
+/// #[repr(usize)]
+/// enum Errors {
+///     Success = 0,
+///     #[value(0x10)] NotDefined(String),
+///     InvalidArg(String, String) = 0x20,
+///     OpNotSupported = 0x30,
+/// }
+/// ```
+///
+/// Enumber turns this into a normal enum and also implements
+/// [`From`][std::convert::From].  This makes it easy to convert the
+/// enum into its corresponding numeric value, which is particularly
+/// useful when converting from rich Rust-style errors to C-style
+/// error codes:
+///
+/// ```rust
+/// # #[enumber::into]
+/// # #[repr(usize)]
+/// # enum Errors {
+/// #     Success = 0,
+/// #     #[value(0x10)] NotDefined(String),
+/// #     InvalidArg(String, String) = 0x20,
+/// #     OpNotSupported = 0x30,
+/// # }
+/// type ErrorCode = usize;
+///
+/// fn some_ffi() -> ErrorCode {
+///     Errors::OpNotSupported.into()
+/// }
+/// # assert_eq!(some_ffi(), 0x30);
+/// ```
+///
+/// Unlike the [`convert`][macro@convert] macro, this macro does not
+/// generate an implementation of `From` in the opposite direction
+/// (i.e., from a numeric value to a variant), nor does it generate an
+/// implementation of [`FromStr`][std::str::FromStr] for the simple
+/// reason that it is not possible to convert an error code to a
+/// variant that has data without having default values, which is not
+/// always reasonable.
+///
+/// This macro also doesn't support ranges or a default, because we
+/// are only converting from variants to values and only a single
+/// value per variant makes sense.  As such, the following does not
+/// work:
+///
+/// ```rust,compile_fail
+/// #[enumber::into]
+/// #[repr(u8)]
+/// enum Age {
+///     Child(String) = 0..=12,
+///     Teenager(String) = 13..=19,
+///     Adult(String) = 20..=65,
+///     Pensioner(String) = 66..=255,
+/// }
+/// ```
+///
+/// And, `into` does not implement Display as there isn't a single
+/// reasonable way to implement Display for variants with data.
+#[proc_macro_attribute]
+pub fn into(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as DeriveInput);
+
+    match to_derive(input, Mode::Into) {
         Ok(res) => quote!(#res).into(),
         Err(err) => err.to_compile_error().into(),
     }
