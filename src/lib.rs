@@ -68,9 +68,7 @@
 
 use proc_macro::TokenStream;
 
-use quote::{
-    quote, ToTokens
-};
+use quote::{quote, ToTokens};
 use syn::{
     parse_macro_input, parse_quote, Attribute, Data, DeriveInput, Error, Expr, Field, Fields,
     Ident, Type, Visibility,
@@ -95,9 +93,7 @@ fn find_repr(name: &Ident, input: &[Attribute]) -> Result<Type, Error> {
     Err(Error::new_spanned(name, "missing repr(SomeType) attribute"))
 }
 
-fn generate_conversions(input: DeriveInput, mode: Mode)
-    -> Result<impl Into<TokenStream>, Error>
-{
+fn generate_conversions(input: DeriveInput, mode: Mode) -> Result<impl Into<TokenStream>, Error> {
     let name = &input.ident;
     let visibility = &input.vis;
     let variants = match &input.data {
@@ -152,11 +148,15 @@ fn generate_conversions(input: DeriveInput, mode: Mode)
                             ));
                         }
                         default_variant = Some(n);
-                    } else if let Some(range) = variant.attrs.iter().find(|a| a.path.is_ident("ranged"))
+                    } else if let Some(range) =
+                        variant.attrs.iter().find(|a| a.path.is_ident("ranged"))
                     {
                         let range: ExprRange = range.parse_args()?;
                         if range.from.is_none() && range.to.is_none() {
-                            return Err(Error::new_spanned(range, "empty ranges are not supported"));
+                            return Err(Error::new_spanned(
+                                range,
+                                "empty ranges are not supported",
+                            ));
                         }
                         let base = range
                             .from
@@ -242,31 +242,31 @@ fn generate_conversions(input: DeriveInput, mode: Mode)
         })
         .collect();
 
-    let mut tokens = quote!{};
+    let mut tokens = quote! {};
 
     // We now have a set of mappings, so let's generate the conversion *to*
     // the type we want.  Something like:
     //
-    //   impl ::std::convert::Into<u16> for OpenExample
+    //   impl ::std::convert::From<OpenExample> for u16
     //   {
-    //       fn into(self) -> u16
+    //       fn from(item: OpenExample) -> u16
     //       {
     //           match self {
-    //               Self::First => 1,
-    //               Self::Second => 2,
-    //               Self::Third => 23,
+    //               OpenExample::First => 1,
+    //               OpenExample::Second => 2,
+    //               OpenExample::Third => 23,
     //           }
     //       }
     //   }
     let matcharms: Vec<_> = mappings
         .iter()
         .map(|entry| {
-            let name = entry.0;
+            let ename = entry.0;
             let value = &entry.2;
             let fields = entry.4;
             if matches!(value, Expr::Range(_)) {
                 quote!(
-                    Self::#name(value) => value,
+                    #name :: #ename(value) => value,
                 )
             } else if fields > 0 {
                 let mut f = quote!();
@@ -274,27 +274,27 @@ fn generate_conversions(input: DeriveInput, mode: Mode)
                     quote!(_,).to_tokens(&mut f);
                 }
                 quote!(
-                    Self :: #name(#f) => #value,
+                    #name :: #ename(#f) => #value,
                 )
             } else {
                 quote!(
-                    Self :: #name => #value,
+                    #name :: #ename => #value,
                 )
             }
         })
         .collect();
-    let defaultarm = if let Some((name, _)) = default_variant {
+    let defaultarm = if let Some((ename, _)) = default_variant {
         quote!(
-            Self :: #name (value) => value,
+            #name :: #ename (value) => value,
         )
     } else {
         quote!()
     };
 
     let t = quote! {
-        impl ::std::convert::Into<#inttype> for #name {
-            fn into(self) -> #inttype {
-                match self {
+        impl ::std::convert::From<#name> for #inttype {
+            fn from(item: #name) -> #inttype {
+                match item {
                     #(#matcharms)*
                     #defaultarm
                 }
@@ -572,7 +572,7 @@ fn to_derive(mut input: DeriveInput, mode: Mode) -> Result<DeriveInput, Error> {
                     #[derive(::enumber::Into)]
                 )
             }
-        }
+        },
     );
 
     let mut repr = find_repr(&input.ident, &input.attrs).ok();
