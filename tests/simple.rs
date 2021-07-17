@@ -34,8 +34,10 @@ pub enum LogLevel {
 #[repr(usize)]
 #[derive(Debug)]
 enum IpAddr {
-    #[value(4)] V4(u8, u8, u8, u8),
-    #[value(6)] V6(String),
+    #[value(4)]
+    V4(u8, u8, u8, u8),
+    #[value(6)]
+    V6(String),
 }
 
 #[derive(Debug)]
@@ -53,7 +55,6 @@ enum Errors {
     CannotDeleteKey(Fingerprint, String) = 0x212,
 }
 
-
 #[test]
 fn test_open_from_num_canfail() {
     assert!(OpenExample::try_from(45).is_err());
@@ -67,26 +68,35 @@ fn check_from_hex() {
             LogLevel::Warn(n) if n == 0xa3 => {}
             t => panic!("Unexpected parsed value: {:?}", t),
         },
-        Err(e) => panic!(e),
+        Err(e) => panic!("{:?}", e),
     }
 }
 
 #[test]
 fn test_ip_addr() {
-    assert_eq!(4 as usize, IpAddr::V4(192, 168, 1, 1).into());
-    assert_eq!(6 as usize, IpAddr::V6("1::".into()).into());
+    assert_eq!(4_usize, IpAddr::V4(192, 168, 1, 1).into());
+    assert_eq!(6_usize, IpAddr::V6("1::".into()).into());
 }
 
 #[test]
 fn test_errors() {
-    assert_eq!(0x110 as usize,
-               Errors::CannotLoadCryptoLibrary("file not found".into()).into());
-    assert_eq!(0x120 as usize,
-               Errors::InitSqlite3WithoutMutex.into());
-    assert_eq!(0x202 as usize,
-               Errors::AmbiguousName("a".into(), "123".into()).into());
-    assert_eq!(0x212 as usize,
-               Errors::CannotDeleteKey(
-                   Fingerprint { value: b"1234".to_vec().into_boxed_slice() },
-                   "Key does not exists".into()).into());
+    assert_eq!(
+        0x110_usize,
+        Errors::CannotLoadCryptoLibrary("file not found".into()).into()
+    );
+    assert_eq!(0x120_usize, Errors::InitSqlite3WithoutMutex.into());
+    assert_eq!(
+        0x202_usize,
+        Errors::AmbiguousName("a".into(), "123".into()).into()
+    );
+    assert_eq!(
+        0x212_usize,
+        Errors::CannotDeleteKey(
+            Fingerprint {
+                value: b"1234".to_vec().into_boxed_slice()
+            },
+            "Key does not exists".into()
+        )
+        .into()
+    );
 }
