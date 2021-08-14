@@ -247,17 +247,23 @@ fn generate_conversions(input: DeriveInput, mode: Mode) -> Result<impl Into<Toke
     // We now have a set of mappings, so let's generate the conversion *to*
     // the type we want.  Something like:
     //
-    //   impl ::std::convert::From<OpenExample> for u16
-    //   {
-    //       fn from(item: OpenExample) -> u16
-    //       {
-    //           match self {
-    //               OpenExample::First => 1,
-    //               OpenExample::Second => 2,
-    //               OpenExample::Third => 23,
-    //           }
-    //       }
-    //   }
+    //     impl ::std::convert::From<&OpenExample> for u16
+    //     {
+    //         fn from(item: &OpenExample) -> u16
+    //         {
+    //             match item
+    //             {
+    //                 &OpenExample::First => 1,
+    //                 &OpenExample::Second => 2,
+    //                 &OpenExample::Third => 23,
+    //             }
+    //         }
+    //     }
+    //     impl ::std::convert::From<OpenExample> for u16 {
+    //         fn from(item: OpenExample) -> u16 {
+    //             (& item).into()
+    //         }
+    //     }
     let matcharms: Vec<_> = mappings
         .iter()
         .map(|entry| {
@@ -266,7 +272,7 @@ fn generate_conversions(input: DeriveInput, mode: Mode) -> Result<impl Into<Toke
             let fields = entry.4;
             if matches!(value, Expr::Range(_)) {
                 quote!(
-                    #name :: #ename(value) => value,
+                    &#name :: #ename(value) => value,
                 )
             } else if fields > 0 {
                 let mut f = quote!();
@@ -274,30 +280,36 @@ fn generate_conversions(input: DeriveInput, mode: Mode) -> Result<impl Into<Toke
                     quote!(_,).to_tokens(&mut f);
                 }
                 quote!(
-                    #name :: #ename(#f) => #value,
+                    &#name :: #ename(#f) => #value,
                 )
             } else {
                 quote!(
-                    #name :: #ename => #value,
+                    &#name :: #ename => #value,
                 )
             }
         })
         .collect();
     let defaultarm = if let Some((ename, _)) = default_variant {
         quote!(
-            #name :: #ename (value) => value,
+            &#name :: #ename (value) => value,
         )
     } else {
         quote!()
     };
 
     let t = quote! {
-        impl ::std::convert::From<#name> for #inttype {
-            fn from(item: #name) -> #inttype {
+        impl ::std::convert::From<&#name> for #inttype {
+            fn from(item: &#name) -> #inttype {
                 match item {
                     #(#matcharms)*
                     #defaultarm
                 }
+            }
+        }
+
+        impl ::std::convert::From<#name> for #inttype {
+            fn from(item: #name) -> #inttype {
+                (&item).into()
             }
         }
     };
