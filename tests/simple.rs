@@ -100,3 +100,26 @@ fn test_errors() {
         .into()
     );
 }
+
+#[test]
+fn test_errors_refs() {
+    assert_eq!(
+        0x110_usize,
+        (&Errors::CannotLoadCryptoLibrary("file not found".into())).into()
+    );
+    assert_eq!(0x120_usize, (&Errors::InitSqlite3WithoutMutex).into());
+    assert_eq!(
+        0x202_usize,
+        (&Errors::AmbiguousName("a".into(), "123".into())).into()
+    );
+    assert_eq!(
+        0x212_usize,
+        (&Errors::CannotDeleteKey(
+            Fingerprint {
+                value: b"1234".to_vec().into_boxed_slice()
+            },
+            "Key does not exists".into()
+        ))
+        .into()
+    );
+}
